@@ -1,0 +1,27 @@
+version: 0.2
+
+env:
+  parameter-store:
+    package_ver: /$ssm_parameter_path/package_version
+    instance_type: /$ssm_parameter_path/instance_type
+    subnet_id: /$ssm_parameter_path/subnet_id
+    security_group_id: /$ssm_parameter_path/security_group_id
+    instance_profile: /$ssm_parameter_path/instance_profile
+phases:
+  build:
+    commands:
+      - #!/bin/bash
+      - echo Starting build
+      - tar -cvf app.tar app
+      - echo Build complete
+      - chmod +x version_update.py
+      - new_version=$(python version_update.py "${package_ver}")
+      - echo "${new_version}"
+      - printf '{"Parameters":{"packageversion":"%s","instancetype":"%s","subnetid":"%s","securitygroupid":"%s","instanceprofile":"%s"}}' "${new_version}" "${instance_type}" "${subnet_id}" "${security_group_id}" "${instance_profile}">> version.json
+      - aws ssm put-parameter --name /$ssm_parameter_path/package_version --type "String" --value "${new_version}" --overwrite
+artifacts:
+  files: 
+    - app.tar
+    - imagebuilder.yml
+    - version.json
+

@@ -1,0 +1,905 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudformation template to create a CICD pipeline with EC2 image builder and code pipeline for an immutable server architecture
+Parameters:
+  LatestAmiId:
+    Description: Latest Amazon Linux 2 AMI
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  KeyName:
+    Description: SSH key to connect to EC2 instance
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: 'mydevkey'
+  InstanceType:
+    Description: 'Instance Type'
+    Type: String
+    Default: 't2.micro'
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: 
+            Fn::Join:
+              - '-'
+              - - !Ref AWS::StackName
+                - 'vpc'
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - !Ref AWS::Region
+                - 'igw'
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+  publicsubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: '10.10.0.0/20'
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'public-subnetA'
+  publicsubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: '10.10.16.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'public-subnetB'
+  publicsubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      CidrBlock: '10.10.32.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'public-subnetC'
+  privatesubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: '10.10.48.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'private-subnetA'
+  privatesubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: '10.10.64.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'private-subnetB'
+  privatesubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 2, !GetAZs '' ]
+      CidrBlock: '10.10.80.0/20'
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'private-subnetC'
+  publicroutetable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+  publicipv4route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref publicroutetable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+  routetableassociationpublicA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref publicroutetable
+      SubnetId: !Ref publicsubnetA
+  routetableassociationpublicB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref publicroutetable
+      SubnetId: !Ref publicsubnetB
+  routetableassociationpublicC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref publicroutetable
+      SubnetId: !Ref publicsubnetC
+  publicsecuritygroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group that allows HTTP and SSH'
+      VpcId: !Ref VPC
+      GroupName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'Securitygroup'
+      SecurityGroupIngress:
+        - Description: Allow SSH port for IPv4
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+        - Description: Allow HTTP port
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+  ingressrule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref publicsecuritygroup
+      SourceSecurityGroupId: !Ref publicsecuritygroup
+      IpProtocol: -1
+  privatesecuritygroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group that allows HTTP and SSH from public subnet'
+      VpcId: !Ref VPC
+      GroupName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'Priv-Securitygroup'
+      SecurityGroupIngress:
+        - Description: Allow SSH port for IPv4
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref publicsecuritygroup
+        - Description: Allow HTTP port
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref publicsecuritygroup
+  launchtemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'launchtemplate'
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref privatesecuritygroup
+  loadbalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: 'ipv4'
+      Name: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'loadbalancer'
+      Scheme: 'internet-facing'
+      SecurityGroups:
+        - !Ref publicsecuritygroup
+      Subnets:
+        - !Ref publicsubnetA
+        - !Ref publicsubnetB
+        - !Ref publicsubnetC
+      Type: 'application'  
+  targetgroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'targetgroup'
+      TargetType: 'instance'
+      VpcId: !Ref VPC
+      Protocol: 'HTTP'
+      ProtocolVersion: 'HTTP1'
+      Port: 80
+  httplistener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref loadbalancer
+      Port: 80
+      Protocol: 'HTTP'
+      DefaultActions:
+        - Type: 'forward'
+          TargetGroupArn: !Ref targetgroup
+  autoscalinggrp:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'ASG'
+      DesiredCapacity: 1
+      MaxSize: 1
+      MinSize: 1
+      HealthCheckType: 'ELB'
+      HealthCheckGracePeriod: 15
+      TargetGroupARNs:
+        - !Ref targetgroup
+      VPCZoneIdentifier:
+        - !Ref privatesubnetA
+        - !Ref privatesubnetB
+        - !Ref privatesubnetC
+      LaunchTemplate:
+        LaunchTemplateId: !Ref launchtemplate
+        Version: !GetAtt launchtemplate.DefaultVersionNumber 
+  lambdarole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'lambdarole'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: "Allow"
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: 
+          Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'lambdapolicy'
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Sid: AllowLogging
+            Effect: "Allow"
+            Action:
+              - "logs:CreateLogGroup"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: "*"
+          - Sid: codepipelinestatusupdate
+            Effect: "Allow"
+            Action:
+              - "codepipeline:PutJobFailureResult"
+              - "codepipeline:PutJobSuccessResult"
+            Resource: "*"
+          - Sid: describeasglt
+            Effect: "Allow"
+            Action:
+              - "ec2:DescribeLaunchTemplates"
+              - "autoscaling:DescribeInstanceRefreshes"
+            Resource: "*"
+          - Sid: updatelaunchtemplate
+            Effect: "Allow"
+            Action:
+              - "ec2:ModifyLaunchTemplate"
+              - "ec2:CreateLaunchTemplateVersion"
+              - "ec2:RunInstances"
+            Resource: '*'
+          - Sid: instancerefresh
+            Effect: "Allow"
+            Action:
+              - "autoscaling:StartInstanceRefresh"
+              - "autoscaling:UpdateAutoScalingGroup"
+            Resource: '*'
+  instancerefreshlambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt lambdarole.Arn
+      Runtime: 'python3.8'
+      Environment:
+        Variables:
+          asg_name: !Ref autoscalinggrp
+          launch_template_id: !Ref launchtemplate
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          import botocore.session
+          import os
+
+          from botocore.exceptions import ClientError
+          session = boto3.Session()
+          ec2client=session.client('ec2')
+          asgclient = session.client('autoscaling')
+          code_pipeline = session.client('codepipeline')
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event,context):
+              logger.info("Received event: %s" % json.dumps(event))
+              logger.info("context: %s" % context)
+              
+              job_id = event['CodePipeline.job']['id']
+              job_data = event['CodePipeline.job']['data']
+              
+              launch_template_id = os.environ['launch_template_id']
+              ami_id = job_data['actionConfiguration']['configuration']['UserParameters']
+              asg_name = os.environ['asg_name']
+
+              try:
+                  if 'continuationToken' in job_data:
+                      continue_token = json.loads(job_data['continuationToken'])
+                      instance_refresh_id = continue_token['instance_refresh_id']
+                      instance_refresh_status = asgclient.describe_instance_refreshes(
+                          AutoScalingGroupName=asg_name,
+                          InstanceRefreshIds=[ instance_refresh_id ]
+                      )
+                      logger.info("continue token: %s" % continue_token)
+                      logger.info("Instance Refresh ID: %s" % continue_token['instance_refresh_id'])
+                      
+                      
+                      status = instance_refresh_status['InstanceRefreshes'][0]['Status']
+                      logger.info("Instance Refresh Status: %s" % status)
+                      if status in ['InProgress', 'Pending']:
+                          code_pipeline.put_job_success_result(jobId=job_id, continuationToken= job_data['continuationToken'])
+                      elif status == 'Successful':
+                          code_pipeline.put_job_success_result(jobId=job_id)
+                      else:
+                          message = 'Instance Refresh ended with status:' + status
+                          code_pipeline.put_job_failure_result(jobId=job, failureDetails={'message': message, 'type': 'JobFailed'})
+                          put_job_failure(job_id, 'Instance Refresh failed: ' + status)
+                          
+                  else:
+                      lt_details = ec2client.describe_launch_templates(
+                          DryRun = False,
+                          LaunchTemplateIds = [launch_template_id]
+                      )
+                      latest_version=lt_details['LaunchTemplates'][0]['LatestVersionNumber']
+
+                      lt_version = ec2client.create_launch_template_version(
+                          LaunchTemplateData={
+                              'ImageId': ami_id
+                          },
+                          LaunchTemplateId=launch_template_id,
+                          SourceVersion=str(latest_version)
+                      )
+                      new_version = lt_version['LaunchTemplateVersion']['VersionNumber']
+
+                      modify_lt = ec2client.modify_launch_template(
+                          DefaultVersion=str(new_version),
+                          LaunchTemplateId=launch_template_id
+                      )
+
+                      update_asg = asgclient.update_auto_scaling_group(
+                          AutoScalingGroupName=asg_name,
+                          LaunchTemplate={
+                              'LaunchTemplateId':launch_template_id,
+                              'Version': str(new_version)
+                          }
+                      )
+
+                      instance_refresh = asgclient.start_instance_refresh(
+                          AutoScalingGroupName=asg_name,
+                          Strategy='Rolling',
+                          Preferences={
+                              'MinHealthyPercentage': 0,
+                              'InstanceWarmup': 30
+                          }
+                      )
+                      instance_refresh_id = instance_refresh['InstanceRefreshId']
+                      continuation_token = json.dumps({'previous_job_id': job_id,'instance_refresh_id': instance_refresh_id})
+                      code_pipeline.put_job_success_result(jobId=job_id, continuationToken=continuation_token)
+
+              except ClientError as e:
+                  logger.error('Error: %s', e)
+                  message = 'Instance Refresh Failed:' + e
+                  code_pipeline.put_job_failure_result(jobId=job, failureDetails={'message': message, 'type': 'JobFailed'})
+  instancetypeparam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: 
+        Fn::Join:
+          - '/'
+          - - ''
+            - !Ref AWS::StackName
+            - 'instance_type'
+      Type: String
+      Value: !Ref InstanceType
+  packageversionparam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: 
+        Fn::Join:
+          - '/'
+          - - ''
+            - !Ref AWS::StackName
+            - 'package_version'
+      Type: String
+      Value: 1.0.0
+  subnetidparam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: 
+        Fn::Join:
+          - '/'
+          - - ''
+            - !Ref AWS::StackName
+            - 'subnet_id'
+      Type: String
+      Value: !Ref publicsubnetA
+  securitygrpidparam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: 
+        Fn::Join:
+          - '/'
+          - - ''
+            - !Ref AWS::StackName
+            - 'security_group_id'
+      Type: String
+      Value: !Ref publicsecuritygroup
+  instanceprofileparam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: 
+        Fn::Join:
+          - '/'
+          - - ''
+            - !Ref AWS::StackName
+            - 'instance_profile'
+      Type: String
+      Value: !Ref ec2instanceprofile
+  cicdartifacts:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'artifactbucket250316'
+      VersioningConfiguration:
+        Status: Enabled
+  cicdartifactspolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref cicdartifacts
+      PolicyDocument:
+        Statement:
+          - Sid: 'whitelistedGet'
+            Action: 
+              - 's3:GetObject'
+            Effect: 'Allow'
+            Principal: 
+              AWS:
+                - !GetAtt codepipelineservicerole.Arn
+                - !GetAtt codebuildservicerole.Arn
+            Resource: 
+              Fn::Join:
+                - ''
+                - - !GetAtt cicdartifacts.Arn
+                  - '/*'
+          - Sid: 'WhitelistedPut'
+            Action:
+              - 's3:putObject'
+            Effect: 'Allow'
+            Principal:
+              AWS:
+                - !GetAtt codepipelineservicerole.Arn
+                - !GetAtt codebuildservicerole.Arn
+            Resource:
+              Fn::Join:
+                - ''
+                - - !GetAtt cicdartifacts.Arn
+                  - '/*'
+  ec2instancerole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'Ec2InstanceRole'
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - 'arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder'
+      Policies:
+      - PolicyName: 
+          Fn::Join:
+            - '-'
+            - - !Ref AWS::StackName
+              - 'ec2-instance-policy'
+        PolicyDocument:
+          Statement:
+          - Sid: 'S3permissions'
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetBucketVersioning'
+              - 's3:PutObject'
+            Resource: 
+              Fn::Join:
+                - ''
+                - - !GetAtt cicdartifacts.Arn
+                  - '/*'
+            Effect: 'Allow'
+  ec2instanceprofile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName:
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'Ec2InstanceProfile'
+      Path: '/'
+      Roles:
+        - !Ref ec2instancerole
+  codepipelineservicerole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'CodePipelineServiceRole'
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: 
+          Fn::Join:
+            - '-'
+            - - !Ref AWS::StackName
+              - 'codepipeline-service-policy'
+        PolicyDocument:
+          Statement:
+          - Sid: 'cicdpipelinepermission'
+            Action:
+              - 'codecommit:*'
+              - 'codebuild:*'
+              - 'codedeploy:*'
+              - 'sns:*'
+              - 'cloudwatch:*'
+            Resource: '*'
+            Effect: 'Allow'
+          - Sid: 'S3permissions'
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetBucketVersioning'
+              - 's3:PutObject'
+            Resource: 
+              Fn::Join:
+                - ''
+                - - !GetAtt cicdartifacts.Arn
+                  - '/*'
+            Effect: 'Allow'
+          - Sid: 'lambdaexecutepermission'
+            Action:
+              - 'lambda:InvokeFunction'
+              - 'lambda:ListFunctions'
+            Resource: '*'
+            Effect: 'Allow'
+          - Sid: 'Cloudformationpermissions'
+            Action:
+              - 'cloudformation:CreateStack'
+              - 'cloudformation:DeleteStack'
+              - 'cloudformation:DescribeStacks'
+              - 'cloudformation:UpdateStack'
+              - 'cloudformation:SetStackPolicy'
+              - 'cloudformation:ValidateTemplate'
+            Resource: "*"
+            Effect: 'Allow'
+          - Sid: 'iamrolepasspermissions'
+            Action:
+              - 'iam:PassRole'
+            Resource: '*'
+            Effect: 'Allow'
+            Condition:
+              StringEqualsIfExists:
+                iam:PassedToService:
+                  - 'cloudformation.amazonaws.com'
+          Version: '2012-10-17'
+  codebuildservicerole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'CodeBuildServiceRole'
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codebuild.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName:
+          Fn::Join:
+            - '-'
+            - - !Ref AWS::StackName
+              - 'codepipeline-service-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: 'S3permissions'
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:GetBucketVersioning'
+              - 's3:PutObject'
+            Resource: 
+              Fn::Join:
+                - ''
+                - - !GetAtt cicdartifacts.Arn
+                  - '/*'
+            Effect: 'Allow'
+          - Sid: 'cloudwatchpermissions'
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: '*'
+            Effect: 'Allow'
+          - Sid: 'CodeBuildpermissions'
+            Action:
+              - 'codebuild:*'
+            Resource: '*'
+            Effect: 'Allow'
+          - Sid: 'SSMPermissions'
+            Action:
+              - 'ssm:PutParameter'
+              - 'ssm:GetParameterHistory'
+              - 'ssm:GetParametersByPath'
+              - 'ssm:GetParameters'
+              - 'ssm:GetParameter'
+            Resource:
+              Fn::Join:
+                - ''
+                - - 'arn:aws:ssm:'
+                  - !Ref AWS::Region
+                  - ':'
+                  - !Ref AWS::AccountId
+                  - ':parameter/'
+                  - !Ref AWS::StackName
+                  - '/*'
+            Effect: 'Allow'
+          - Sid: 'SSMDescribePermissions'
+            Action:
+              - 'ssm:DescribeParameters'
+            Resource: '*'
+            Effect: 'Allow'
+  codedeployservicerole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'CodeDeployServiceRole'
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - cloudformation.amazonaws.com
+            - codedeploy.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName:
+          Fn::Join:
+            - '-'
+            - - !Ref AWS::StackName
+              - 'codedeploy-service-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: 'imagebuilderpermissions'
+            Action:
+              - 'imagebuilder:ListComponentBuildVersions'
+              - 'imagebuilder:ListInfrastructureConfigurations'
+              - 'imagebuilder:ListImageBuildVersions'
+              - 'imagebuilder:ListComponents'
+              - 'imagebuilder:ListImageRecipes'
+              - 'imagebuilder:GetComponent'
+              - 'imagebuilder:GetImageRecipe'
+              - 'imagebuilder:GetImage'
+              - 'imagebuilder:GetInfrastructureConfiguration'
+              - 'ec2:DescribeImages'
+              - 'imagebuilder:CreateImage'
+              - 'imagebuilder:CreateImageRecipe'
+              - 'imagebuilder:CreateComponent'
+              - 'imagebuilder:CreateInfrastructureConfiguration'
+              - 'imagebuilder:UpdateInfrastructureConfiguration'
+              - 'imagebuilder:DeleteInfrastructureConfiguration'
+              - 'imagebuilder:DeleteComponent'
+              - 'imagebuilder:DeleteImageRecipe'
+              - 'imagebuilder:DeleteImage'
+              - 'imagebuilder:TagResource'
+              - 'imagebuilder:UntagResource'
+            Resource: '*'
+            Effect: 'Allow'
+          - Sid: 'SSMPermissions'
+            Action:
+              - 'ssm:GetParameters'
+              - 'ssm:GetParameter'
+              - 'ssm:DescribeParameters'
+            Resource: '*'
+            Effect: 'Allow'
+          - Sid: 'ec2passrolepermissions'
+            Action:
+              - 'iam:PassRole'
+            Resource: !GetAtt ec2instancerole.Arn
+            Effect: 'Allow'
+  coderepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'source'
+      RepositoryDescription: Code Commit repository for EC2 imagebuilder
+  codebuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'build'
+      Description: Code Build for EC2 imagebuilder
+      ServiceRole: !GetAtt codebuildservicerole.Arn
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: 'AWS_ACCOUNT_ID'
+            Value: !Ref AWS::AccountId
+          - Name: 'AWS_DEFAULT_REGION'
+            Value: !Ref AWS::Region
+          - Name: 'ssm_parameter_path'
+            Value: !Ref AWS::StackName
+      Artifacts:
+        Type: CODEPIPELINE
+  codepipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - !Ref AWS::StackName
+            - 'codepipeline'
+      RoleArn: !GetAtt codepipelineservicerole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref cicdartifacts
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: 
+                Fn::Join:
+                  - '-'
+                  - - !Ref AWS::StackName
+                    - 'codecommit'
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: !GetAtt coderepo.Name
+                BranchName: master
+                PollForSourceChanges: False
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: 'SourceArtifact'
+        - Name: Build
+          Actions:
+            - Name: 
+                Fn::Join:
+                  - '-'
+                  - - !Ref AWS::StackName
+                    - 'build'
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref codebuild
+                PrimarySource: 
+                  Fn::Join:
+                    - '-'
+                    - - !Ref AWS::StackName
+                      - 'SourceArtifact'
+              InputArtifacts:
+                - Name: 'SourceArtifact'
+              OutputArtifacts:
+                - Name: 'BuildArtifact'
+        - Name: ImageBuild
+          Actions:
+            - Name:
+                Fn::Join:
+                  - '-'
+                  - - !Ref AWS::StackName
+                    - 'imagebuild'
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt codedeployservicerole.Arn
+                StackName: 
+                  Fn::Join:
+                      - '-'
+                      - - !Ref AWS::StackName
+                        - 'imagebuilder'
+                TemplateConfiguration: 'BuildArtifact::version.json'
+                TemplatePath: 'BuildArtifact::imagebuilder.yml'
+                ParameterOverrides: '{ "bucketname":  { "Fn::GetArtifactAtt" : ["BuildArtifact", "BucketName"]},"objectkey":  { "Fn::GetArtifactAtt" : ["BuildArtifact", "ObjectKey"]},"artifacturl":  { "Fn::GetArtifactAtt" : ["BuildArtifact", "URL"]}}'
+              InputArtifacts:
+                - Name: 'BuildArtifact'
+              Namespace: 'DeployVariables'
+        - Name: instancerefresh
+          Actions:
+            - Name:
+                Fn::Join:
+                  - '-'
+                  - - !Ref AWS::StackName
+                    - 'instancerefresh'
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider:  Lambda
+                Version: 1
+              Configuration:
+                FunctionName: !Ref instancerefreshlambda
+                UserParameters: '#{DeployVariables.imageid}'
+              InputArtifacts: 
+                - Name: 'BuildArtifact'
+

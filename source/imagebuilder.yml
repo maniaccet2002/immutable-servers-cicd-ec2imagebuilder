@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Cloudformation template to create a custom VPC
+Parameters:
+  packageversion:
+    Description: 'Package Version'
+    Type: String
+    Default: 1.0.0
+  instancetype:
+    Description: 'instance_type'
+    Type: String
+    Default: 't2.micro'
+  subnetid:
+    Description: 'Subnet ID'
+    Type: String
+  securitygroupid:
+    Description: 'Security Group ID'
+    Type: String
+  bucketname:
+    Description: 'bucketname'
+    Type: String
+  objectkey:
+    Description: 'objectkey'
+    Type: String
+  artifacturl:
+    Description: 'artifacturl'
+    Type: String
+  amiid:
+    Description: Latest Amazon Linux 2 AMI
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  instanceprofile:
+    Description: EC2 Instance Profile
+    Type: String
+Resources:
+  infraconfig:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      InstanceProfileName: !Ref instanceprofile
+      Name: !Join ['',[!Ref AWS::StackName,'-Infrastructure-Config']]
+      InstanceTypes:
+        - !Ref instancetype
+      SubnetId: !Ref subnetid
+      SecurityGroupIds:
+        - !Ref securitygroupid
+  imagebuilder:
+    Type: AWS::ImageBuilder::Image
+    Properties:
+      ImageRecipeArn: !Ref imagerecipe
+      InfrastructureConfigurationArn: !Ref infraconfig
+  imagecomponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Join ['',[!Ref AWS::StackName,'-Component']]
+      Platform: 'Linux'
+      Version: !Ref packageversion
+      Data: !Sub |
+        name: mysfitsdocument
+        description: Image builder document for mysfits webapp.
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: HelloWorldStep
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - echo "Starting EC2 instance bootstraping."
+                    - sudo yum update -y
+                    - sudo yum install httpd wget -y
+                    - mkdir /tmp/imagebuild
+                    - aws s3 cp s3://${bucketname}/${objectkey} /tmp/imagebuild/package.zip
+                    - cd /tmp/imagebuild/
+                    - unzip package.zip
+                    - tar -xvf app.tar
+                    - cp app/index.html /var/www/html/index.html
+                    - chown -R apache:apache /var/www/html
+                    - sudo systemctl enable httpd
+                    - sudo systemctl start httpd
+                    - echo "Bootstraping complete"
+  imagerecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: "imagebuilderrecipe"
+      ParentImage: !Ref amiid
+      Version: !Ref packageversion
+      Components:
+        - ComponentArn: !Ref imagecomponent
+
+Outputs:
+  imageid:
+    Description: Image Id
+    Value: !GetAtt imagebuilder.ImageId
+  bucketname:
+    Description: 'bucketname'
+    Value: !Ref bucketname
+  objectkey:
+    Description: 'objectkey'
+    Value: !Ref objectkey
+  artifacturl:
+    Description: 'artifacturl'
+    Value: !Ref artifacturl
+  
