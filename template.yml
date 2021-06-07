@@ -185,7 +185,6 @@ Resources:
       LaunchTemplateData:
         ImageId: !Ref LatestAmiId
         InstanceType: !Ref InstanceType
-        KeyName: !Ref KeyName
         SecurityGroupIds:
           - !Ref privatesecuritygroup
   loadbalancer:
@@ -264,6 +263,8 @@ Resources:
           Principal:
             Service: lambda.amazonaws.com
           Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
       Policies:
       - PolicyName: 
           Fn::Join:
@@ -273,13 +274,6 @@ Resources:
         PolicyDocument:
           Version: "2012-10-17"
           Statement:
-          - Sid: AllowLogging
-            Effect: "Allow"
-            Action:
-              - "logs:CreateLogGroup"
-              - "logs:CreateLogStream"
-              - "logs:PutLogEvents"
-            Resource: "*"
           - Sid: codepipelinestatusupdate
             Effect: "Allow"
             Action:
@@ -333,7 +327,6 @@ Resources:
           logger.setLevel(logging.INFO)
 
           def lambda_handler(event,context):
-              logger.info("Received event: %s" % json.dumps(event))
               logger.info("context: %s" % context)
               
               job_id = event['CodePipeline.job']['id']
@@ -399,8 +392,8 @@ Resources:
                           AutoScalingGroupName=asg_name,
                           Strategy='Rolling',
                           Preferences={
-                              'MinHealthyPercentage': 0,
-                              'InstanceWarmup': 30
+                              'MinHealthyPercentage': 50,
+                              'InstanceWarmup': 60
                           }
                       )
                       instance_refresh_id = instance_refresh['InstanceRefreshId']
@@ -411,6 +404,14 @@ Resources:
                   logger.error('Error: %s', e)
                   message = 'Instance Refresh Failed:' + e
                   code_pipeline.put_job_failure_result(jobId=job, failureDetails={'message': message, 'type': 'JobFailed'})
+  loggroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - ''
+          - - '/aws/lambda/'
+            -  !Ref instancerefreshlambda
   instancetypeparam:
     Type: AWS::SSM::Parameter
     Properties:
@@ -879,7 +880,7 @@ Resources:
                       - '-'
                       - - !Ref AWS::StackName
                         - 'imagebuilder'
-                TemplateConfiguration: 'BuildArtifact::version.json'
+                TemplateConfiguration: 'BuildArtifact::cfn_params.json'
                 TemplatePath: 'BuildArtifact::imagebuilder.yml'
                 ParameterOverrides: '{ "bucketname":  { "Fn::GetArtifactAtt" : ["BuildArtifact", "BucketName"]},"objectkey":  { "Fn::GetArtifactAtt" : ["BuildArtifact", "ObjectKey"]},"artifacturl":  { "Fn::GetArtifactAtt" : ["BuildArtifact", "URL"]}}'
               InputArtifacts:
@@ -902,4 +903,12 @@ Resources:
                 UserParameters: '#{DeployVariables.imageid}'
               InputArtifacts: 
                 - Name: 'BuildArtifact'
+Outputs:
+  applicationurl:
+    Description: 'URL for the web application'
+    Value: 
+      Fn::Join:
+        - ''
+        - - 'http://'
+          - !GetAtt loadbalancer.DNSName
 

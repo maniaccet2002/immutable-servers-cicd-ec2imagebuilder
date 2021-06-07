@@ -17,11 +17,11 @@ phases:
       - chmod +x version_update.py
       - new_version=$(python version_update.py "${package_ver}")
       - echo "${new_version}"
-      - printf '{"Parameters":{"packageversion":"%s","instancetype":"%s","subnetid":"%s","securitygroupid":"%s","instanceprofile":"%s"}}' "${new_version}" "${instance_type}" "${subnet_id}" "${security_group_id}" "${instance_profile}">> version.json
+      - printf '{"Parameters":{"packageversion":"%s","instancetype":"%s","subnetid":"%s","securitygroupid":"%s","instanceprofile":"%s"}}' "${new_version}" "${instance_type}" "${subnet_id}" "${security_group_id}" "${instance_profile}">> cfn_params.json
       - aws ssm put-parameter --name /$ssm_parameter_path/package_version --type "String" --value "${new_version}" --overwrite
 artifacts:
   files: 
     - app.tar
     - imagebuilder.yml
-    - version.json
+    - cfn_params.json
 
